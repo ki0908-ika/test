@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no" />
+<title>強化オセロ（最強版）</title>
+<style>
+html,body{margin:0;padding:0;height:100%;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  background:linear-gradient(to bottom,#f0f0f3,#d7d7db);} 
+body{display:flex;flex-direction:column;}
+#top-panel{padding:4px;flex:0 0 auto;}
+.controls-row{display:flex;justify-content:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}
+select,button{padding:6px 10px;font-size:14px;border:1px solid rgba(0,0,0,0.15);
+  border-radius:10px;background:rgba(255,255,255,0.7);touch-action:manipulation;}
+.strategy-group{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;}
+.strategy-btn{padding:6px 10px;font-size:13px;border:1px solid rgba(0,0,0,0.2);
+  border-radius:10px;background:rgba(255,255,255,0.7);} 
+.strategy-btn.active{background:rgba(0,122,255,0.85);color:#fff;}
+#board-container{flex:1 1 auto;display:flex;justify-content:center;align-items:center;padding:4px;}
+#board{display:grid;gap:1px;border-radius:16px;background-color:#1e824c;
+  background-image:linear-gradient(#1e824c 1px,transparent 1px),
+  linear-gradient(90deg,#1e824c 1px,transparent 1px);
+  box-shadow:0 4px 12px rgba(0,0,0,0.2);} 
+.cell{background:#27ae60;border-radius:4px;position:relative;}
+.disk{border-radius:50%;position:absolute;}
+.black{background:#000;}
+.white{background:#fff;}
+/* === ヒントの見た目改善（石と間違えない） === */
+.hint-dot{position:absolute;border-radius:50%;
+  width:26%;height:26%;top:37%;left:37%;
+  border:2px solid #0a84ff; /* 青いリング */
+  background:transparent;box-shadow:0 0 0 2px rgba(255,255,255,0.85) inset;}
+/* 直近の手の枠 */
+.last-move{outline:3px solid yellow;outline-offset:-3px;}
+/* ランク表示オーバーレイ */
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-weight:bold;font-size:20px;border-radius:4px;pointer-events:none}
+.rank1{background:rgba(0,255,0,0.35);} 
+.rank2{background:rgba(0,255,0,0.25);} 
+.rank3{background:rgba(0,255,0,0.15);} 
+/* 不利マス（×）は塗りつぶさず、太い赤いクロス＋破線枠で石と明確に区別 */
+.bad{background:transparent;} 
+.bad-cell{outline:3px dashed rgba(220,0,0,0.9);outline-offset:-2px;border-radius:4px;}
+.crossmark{position:absolute;width:80%;height:80%;top:10%;left:10%;}
+.crossmark .xline{position:absolute;width:5px;height:100%;background:rgba(220,0,0,0.95);top:0;left:calc(50% - 2.5px);border-radius:2px;}
+.crossmark .diag1{transform:rotate(45deg);} 
+.crossmark .diag2{transform:rotate(-45deg);} 
+.label{background:rgba(255,255,255,0.9);border-radius:9999px;padding:2px 8px;}
+.label.bad{color:#c00;border:1px solid rgba(220,0,0,0.7);} 
+#score{margin:4px;text-align:center;}
+</style>
+</head>
+<body>
+  <div id="top-panel">
+    <div class="controls-row">
+      <select id="mode">
+        <option value="pvp">プレイヤー vs プレイヤー</option>
+        <option value="cpu">プレイヤー vs CPU</option>
+      </select>
+      <button id="undoBtn">1手前に戻る</button>
+      <button id="resetBtn">最初に戻す</button>
+    </div>
+    <div class="controls-row">
+      <select id="depth" title="強さ（読みの深さ）">
+        <option value="1">弱い</option>
+        <option value="2" selected>普通</option>
+        <option value="3">強い</option>
+        <option value="4">最強</option> <!-- 追加 -->
+      </select>
+      <select id="hintSide" title="提案対象">
+        <option value="none">提案なし</option>
+        <option value="first">黒(先手)が提案</option>
+        <option value="second">白(後手)が提案</option>
+      </select>
+    </div>
+    <div class="strategy-group">
+      <button class="strategy-btn active" data-strategy="balance">バランス</button>
+      <button class="strategy-btn" data-strategy="mobility">相手の手を減らす</button>
+      <button class="strategy-btn" data-strategy="corner">角を取る</button>
+      <button class="strategy-btn" data-strategy="count">石数優先</button>
+    </div>
+    <div id="score"></div>
+  </div>
+  <div id="board-container"><div id="board"></div></div>
+
+<script>
+window.onload=function(){
+const SIZE=8, INF=1e9;
+const firstPlayer='black';
+let board,currentPlayer,mode,cpuDepth,hintSide,strategy='balance';
+let overlayHints=[],history=[],lastMove=null;
+
+// === 盤のリサイズ ===
+function resizeBoard(){
+  const bw=Math.min(window.innerWidth*0.95, 380);
+  const bd=document.getElementById('board');
+  bd.style.width=bw+'px';bd.style.height=bw+'px';
+  bd.style.gridTemplateColumns=`repeat(${SIZE},${bw/SIZE}px)`;
+  bd.style.gridTemplateRows=`repeat(${SIZE},${bw/SIZE}px)`;
+}
+// === 初期化 ===
+function initBoard(){
+  board=Array.from({length:SIZE},()=>Array(SIZE).fill(null));
+  board[3][3]='white';board[3][4]='black';
+  board[4][3]='black';board[4][4]='white';
+  history=[];overlayHints=[];lastMove=null;
+}
+function cloneBoard(b){return b.map(r=>r.slice());}
+function dirs(){return [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,1],[-1,1],[1,-1]];}
+function validMoves(p,b=board){
+  const opp=p==='black'?'white':'black',moves=[];
+  for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    if(b[r][c])continue;
+    for(const [dr,dc] of dirs()){
+      let nr=r+dr,nc=c+dc,se=false;
+      while(nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===opp){se=true;nr+=dr;nc+=dc;}
+      if(se&&nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===p){moves.push([r,c]);break;}
+    }
+  }
+  return moves;
+}
+function applyMove(r,c,p,b=board){
+  const opp=p==='black'?'white':'black';
+  b[r][c]=p;
+  for(const [dr,dc] of dirs()){
+    let nr=r+dr,nc=c+dc,path=[];
+    while(nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===opp){path.push([nr,nc]);nr+=dr;nc+=dc;}
+    if(path.length&&nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===p)
+      path.forEach(([rr,cc])=>b[rr][cc]=p);
+  }
+}
+function countFlips(b,r,c,p){
+  const opp=p==='black'?'white':'black';let f=0;
+  for(const [dr,dc] of dirs()){
+    let nr=r+dr,nc=c+dc,path=0;
+    while(nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===opp){path++;nr+=dr;nc+=dc;}
+    if(path>0&&nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&b[nr][nc]===p)f+=path;
+  }
+  return f;
+}
+
+// === 位置重み（より明確な特徴付け） ===
+const POS_W = [
+  [100,-20, 10,  5,  5, 10,-20,100],
+  [-20,-50, -2, -2, -2, -2,-50,-20],
+  [ 10, -2, -1, -1, -1, -1, -2, 10],
+  [  5, -2, -1,  0,  0, -1, -2,  5],
+  [  5, -2, -1,  0,  0, -1, -2,  5],
+  [ 10, -2, -1, -1, -1, -1, -2, 10],
+  [-20,-50, -2, -2, -2, -2,-50,-20],
+  [100,-20, 10,  5,  5, 10,-20,100]
+];
+function positionalScore(b,root){
+  let s=0;
+  for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    if(!b[r][c])continue;
+    const w=POS_W[r][c];
+    s += (b[r][c]===root? +w : -w);
+  }
+  return s;
+}
+function cornerDiff(b,root){
+  const cs=[[0,0],[0,SIZE-1],[SIZE-1,0],[SIZE-1,SIZE-1]];
+  let s=0;for(const [r,c] of cs){if(!b[r][c])continue;s += (b[r][c]===root? 1 : -1);} 
+  return s;
+}
+function discDiff(b,root){
+  let s=0;for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    if(!b[r][c])continue;s += (b[r][c]===root? 1 : -1);
+  }return s;
+}
+function mobilityDiff(b,root){
+  const opp=root==='black'?'white':'black';
+  return validMoves(root,b).length - validMoves(opp,b).length;
+}
+
+// === 評価関数（戦略ごとにより差別化） ===
+function evaluate(b,root){
+  const pos=positionalScore(b,root);
+  const cor=cornerDiff(b,root);
+  const mob=mobilityDiff(b,root);
+  const dis=discDiff(b,root);
+  switch(strategy){
+    case 'corner':   return 0.25*pos + 100*cor + 5*mob + 1*dis;
+    case 'mobility': return 0.20*pos +  40*cor +10*mob +0.5*dis;
+    case 'count':    return 0.10*pos +  30*cor + 3*mob + 5*dis;
+    default:         return 0.30*pos +  50*cor + 6*mob + 2*dis; // balance
+  }
+}
+function reasonForMove(strategy){
+  switch(strategy){
+    case 'corner':   return "角とその周辺の価値を最優先。次点で手数・石数も考慮";
+    case 'mobility': return "序中盤は相手の合法手を大きく削減。角と位置は副次評価";
+    case 'count':    return "終盤で石差を最大化。序中盤の位置は控えめに評価";
+    default:         return "位置・角・手数・石数のバランスを総合評価";
+  }
+}
+
+// === トランスポジションテーブル＆手順前後（最強向け） ===
+const TT = new Map();
+const TT_MAX = 50000;
+function boardKey(b,toMove,root){
+  // root と strategy を含める（評価関数依存のため）
+  let s=toMove+"|"+root+"|"+strategy+"|";
+  for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    const v=b[r][c]; s += v ? (v==='black'?'b':'w') : '-';
+  }
+  return s;
+}
+function orderedMoves(p,b){
+  const moves=validMoves(p,b);
+  // 角＞返し枚数多＞その他（簡易順序付け）
+  return moves.sort((A,B)=>{
+    const [ar,ac]=A,[br,bc]=B;
+    const isCornerA=(ar===0&&ac===0)||(ar===0&&ac===SIZE-1)||(ar===SIZE-1&&ac===0)||(ar===SIZE-1&&ac===SIZE-1);
+    const isCornerB=(br===0&&bc===0)||(br===0&&bc===SIZE-1)||(br===SIZE-1&&bc===0)||(br===SIZE-1&&bc===SIZE-1);
+    if(isCornerA!==isCornerB) return isCornerA? -1: 1; // 角を先
+    const fa=countFlips(b,ar,ac,p), fb=countFlips(b,br,bc,p);
+    return fb-fa;
+  });
+}
+
+// === αβ探索（TT使用） ===
+function alphabeta(b,d,toMove,root,alpha,beta,useTT){
+  const opp=toMove==='black'?'white':'black';
+  const my=validMoves(toMove,b), op=validMoves(opp,b);
+  if(d===0||(my.length===0&&op.length===0)) return evaluate(b,root);
+  if(my.length===0) return alphabeta(b,d-1,opp,root,alpha,beta,useTT);
+
+  const key = useTT ? (boardKey(b,toMove,root)+"|d"+d+"|a"+alpha+"|b"+beta) : null;
+  if(useTT && TT.has(key)) return TT.get(key);
+
+  const max=(toMove===root);
+  if(max){
+    let best=-INF;
+    for(const [r,c] of orderedMoves(toMove,b)){
+      const nb=cloneBoard(b);applyMove(r,c,toMove,nb);
+      const v=alphabeta(nb,d-1,opp,root,alpha,beta,useTT);
+      if(v>best)best=v;
+      if(v>alpha)alpha=v;
+      if(beta<=alpha)break;
+    }
+    if(useTT){
+      if(TT.size>TT_MAX) TT.clear();
+      TT.set(key,best);
+    }
+    return best;
+  }else{
+    let best=INF;
+    for(const [r,c] of orderedMoves(toMove,b)){
+      const nb=cloneBoard(b);applyMove(r,c,toMove,nb);
+      const v=alphabeta(nb,d-1,opp,root,alpha,beta,useTT);
+      if(v<best)best=v;
+      if(v<beta)beta=v;
+      if(beta<=alpha)break;
+    }
+    if(useTT){
+      if(TT.size>TT_MAX) TT.clear();
+      TT.set(key,best);
+    }
+    return best;
+  }
+}
+
+// 終盤は読みを深くする
+function adjustDepth(base){
+  const empties=SIZE*SIZE-board.flat().filter(Boolean).length;
+  if(empties<8) return base+4;
+  if(empties<12) return base+3;
+  return base;
+}
+
+function scoreMoveWithSearch(b,r,c,p,d){
+  const opp=p==='black'?'white':'black';
+  const flips=countFlips(b,r,c,p);
+  const nb=cloneBoard(b);
+  const before=validMoves(opp,b).length;
+  applyMove(r,c,p,nb);
+  const after=validMoves(opp,nb).length;
+  const useTT = (cpuDepth>=8); // 最強のみ TT を積極使用
+  const long=alphabeta(nb,adjustDepth(d)-1,opp,p,-INF,INF,useTT);
+  return {score:long, flips, mobilityDelta:before-after,
+          isCorner:(r===0&&c===0)||(r===0&&c===SIZE-1)||(r===SIZE-1&&c===0)||(r===SIZE-1&&c===SIZE-1)};
+}
+
+function calcHints(player){
+  const moves=validMoves(player, board);
+  const list=[];
+  for(const [r,c] of moves){
+    const s=scoreMoveWithSearch(board,r,c,player,cpuDepth);
+    list.push({r,c,...s});
+  }
+  list.sort((a,b)=>b.score-a.score);
+  const margin=30; // スコア閾値を上げ、明確に×を付ける
+  const reason=reasonForMove(strategy);
+  return list.map((m,i)=>({
+    r:m.r,c:m.c,
+    rank: i<3 ? i+1 : (m.score < -margin ? -1 : 0), // 最下位でも致命的に悪ければ×
+    reason: m.score < -margin ? `評価が低く不利（${m.score.toFixed(0)}）` : reason
+  }));
+}
+
+// === 描画と操作 ===
+function addDot(cell){
+  const dot=document.createElement('div');
+  dot.className='hint-dot';
+  cell.appendChild(dot);
+}
+function updateScore(){
+  let black=0,white=0;
+  for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    if(board[r][c]==='black')black++;
+    if(board[r][c]==='white')white++;
+  }
+  document.getElementById('score').textContent=`黒:${black} 白:${white}`;
+}
+function drawBoard(){
+  resizeBoard();
+  const el=document.getElementById('board');
+  el.innerHTML='';
+  const isHintTurn=(hintSide==='first'&&currentPlayer==='black')||
+                   (hintSide==='second'&&currentPlayer==='white');
+  overlayHints=isHintTurn?calcHints(currentPlayer):[];
+  const validsNow=validMoves(currentPlayer);
+
+  for(let r=0;r<SIZE;r++)for(let c=0;c<SIZE;c++){
+    const cell=document.createElement('div');cell.className='cell';
+    cell.onclick=()=>handleMove(r,c);
+    if(lastMove && lastMove.r===r && lastMove.c===c) cell.classList.add('last-move');
+
+    if(board[r][c]){
+      const d=document.createElement('div');
+      d.className=`disk ${board[r][c]}`;
+      d.style.width='80%';d.style.height='80%';d.style.top='10%';d.style.left='10%';
+      cell.appendChild(d);
+    }
+
+    const isLegal=validsNow.some(m=>m[0]===r&&m[1]===c);
+    const h=isHintTurn && overlayHints.find(x=>x.r===r&&x.c===c);
+
+    // 自分の手番で提案を出す
+    if(isHintTurn && h){
+      const o=document.createElement('div');
+      o.title=h.reason;
+      o.className='overlay '+(h.rank<=0? 'bad' : ('rank'+h.rank));
+      if(h.rank<=0){
+        // ×を太いクロスで描画、セルに破線枠
+        cell.classList.add('bad-cell');
+        const cross=document.createElement('div');
+        cross.className='crossmark';
+        const l1=document.createElement('div'); l1.className='xline diag1';
+        const l2=document.createElement('div'); l2.className='xline diag2';
+        cross.appendChild(l1);cross.appendChild(l2);
+        o.appendChild(cross);
+        const lab=document.createElement('div'); lab.className='label bad'; lab.textContent='×'; o.appendChild(lab);
+      }else{
+        const lab=document.createElement('div'); lab.className='label'; lab.textContent=h.rank; o.appendChild(lab);
+      }
+      cell.appendChild(o);
+    }
+
+    // 提案オフのとき／相手ターンのときは合法手リングだけ
+    if((hintSide==='none' && isLegal) || (!isHintTurn && isLegal)) addDot(cell);
+
+    el.appendChild(cell);
+  }
+  updateScore();
+}
+
+function other(p){return p==='black'?'white':'black';}
+function advanceTurn(){
+  const opp=other(currentPlayer);
+  if(validMoves(opp).length>0){currentPlayer=opp;return;}
+  if(validMoves(currentPlayer).length===0)return; // 両方パスなら終了扱い
+}
+function handleMove(r,c){
+  if(!validMoves(currentPlayer).some(m=>m[0]===r&&m[1]===c))return;
+  history.push({board:cloneBoard(board),currentPlayer,lastMove});
+  applyMove(r,c,currentPlayer);
+  lastMove={r,c};
+  advanceTurn();
+  drawBoard();
+  if(mode==='cpu'&&currentPlayer==='white') aiMove();
+}
+function bestMove(player,depth){
+  const d=adjustDepth(depth);
+  let best=null,bestScore=-INF;
+  for(const [r,c] of validMoves(player, board)){
+    const info=scoreMoveWithSearch(board,r,c,player,d);
+    if(info.score>bestScore){bestScore=info.score;best=[r,c];}
+  }
+  return best;
+}
+function aiMove(){
+  if(currentPlayer!=='white')return;
+  history.push({board:cloneBoard(board),currentPlayer,lastMove});
+  const mv=bestMove(currentPlayer,cpuDepth);
+  if(mv){applyMove(mv[0],mv[1],currentPlayer);lastMove={r:mv[0],c:mv[1]};}
+  advanceTurn();
+  drawBoard();
+}
+function undoMove(){
+  if(!history.length)return;
+  const h=history.pop();
+  board=h.board;currentPlayer=h.currentPlayer;lastMove=h.lastMove;
+  drawBoard();
+}
+function resetGame(){
+  initBoard();currentPlayer=firstPlayer;
+  drawBoard();
+  if(mode==='cpu'&&currentPlayer==='white') aiMove();
+}
+
+// === 設定更新 ===
+function effectiveDepth(sel){
+  if(sel===1) return 2;   // 弱い
+  if(sel===2) return 4;   // 普通
+  if(sel===3) return 6;   // 強い
+  if(sel===4) return 7;   // 最強（TT/順序付け併用）
+}
+function updateSettings(){
+  mode=document.getElementById('mode').value;
+  cpuDepth=effectiveDepth(parseInt(document.getElementById('depth').value));
+  hintSide=document.getElementById('hintSide').value;
+  drawBoard();
+}
+
+document.getElementById('mode').addEventListener('change',updateSettings);
+ document.getElementById('depth').addEventListener('change',updateSettings);
+ document.getElementById('hintSide').addEventListener('change',updateSettings);
+ document.querySelectorAll('.strategy-btn').forEach(b=>{
+  b.addEventListener('click',e=>{
+    document.querySelectorAll('.strategy-btn').forEach(x=>x.classList.remove('active'));
+    e.target.classList.add('active');
+    strategy=e.target.dataset.strategy;
+    drawBoard();
+  });
+});
+document.getElementById('undoBtn').addEventListener('click',undoMove);
+document.getElementById('resetBtn').addEventListener('click',resetGame);
+window.addEventListener('resize',()=>drawBoard());
+
+// === 初期開始 ===
+mode=document.getElementById('mode').value;
+cpuDepth=effectiveDepth(parseInt(document.getElementById('depth').value));
+hintSide=document.getElementById('hintSide').value;
+initBoard();currentPlayer=firstPlayer;drawBoard();
+};
+</script>
+</body>
+</html>
